@@ -15,7 +15,7 @@ LOOP_PHASE2_AT=0.65 \
 PARALLEL_RESIDUAL_START=7 \
 SEED=1337 \
 MAX_WALLCLOCK_SECONDS=1200 \
-torchrun --standalone --nproc_per_node=8 train_gpt.py 
+torchrun --standalone --nproc_per_node=4 train_gpt.py 
 
 # sleep 300
 

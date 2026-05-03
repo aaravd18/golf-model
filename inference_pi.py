@@ -2,27 +2,27 @@
 RUN WITH: OPENBLAS_NUM_THREADS=4 OMP_NUM_THREADS=4 python inference_pi.py
 
 Inference for the train_gpt_decode model, tuned for Raspberry Pi 3 Model B.
-
 Hardware target: Cortex-A53 4-core @ 1.2 GHz, 1 GB RAM, no usable GPU.
-Loads `final_model.pt` (fp32). The quantized .ptz path is gone — both formats
-end up as fp32 in RAM after loading, so there's no Pi-side benefit to .ptz.
+
+Prefers `final_model.int6.ptz` (quantized) if present, otherwise falls back
+to `final_model.pt` (fp32). Both end up as fp32 in RAM after loading; the
+.ptz is just smaller on disk and slightly noisier in output quality.
 
 Run with:
   OPENBLAS_NUM_THREADS=4 OMP_NUM_THREADS=4 python inference_pi.py
 """
-
 import os
 import sys
+import io
 import types
 import time
 import gc
 
-# Thread envs must be set before importing torch / numpy so BLAS picks them up.
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
-os.environ.setdefault("MKL_NUM_THREADS", "4")  # harmless if MKL absent
+os.environ.setdefault("MKL_NUM_THREADS", "4") 
 
-# Match the env vars used during training (must be set before importing the model).
+# Match the env vars used during training
 os.environ.setdefault("PARALLEL_RESIDUAL_START", "7")
 os.environ.setdefault("LOOP_PHASE2_AT", "0.65")
 os.environ.setdefault("HESSIAN_CLIP_LAMBDA", "0.175")
@@ -36,10 +36,6 @@ import sentencepiece as spm
 torch.set_num_threads(4)
 torch.set_num_interop_threads(1)
 
-# ---------------------------------------------------------------------------
-# Flash-attn shim. Force the math backend so PyTorch doesn't probe alternatives
-# on every call. On CPU there is no flash kernel anyway.
-# ---------------------------------------------------------------------------
 def _flash_attn_func(q, k, v, causal=True):
     H_q, H_kv = q.size(-2), k.size(-2)
     g = H_q // H_kv
@@ -58,54 +54,70 @@ _shim = types.ModuleType("flash_attn_interface")
 _shim.flash_attn_func = _flash_attn_func
 sys.modules["flash_attn_interface"] = _shim
 
-from train_gpt_decode import GPT, Hyperparameters, restore_fp32_params
+from train_gpt_decode import (
+    GPT, Hyperparameters, restore_fp32_params,
+    _decompress, dequantize_mixed,
+)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# Config
+QUANT_PATH      = "final_model.int6.ptz"
+FP32_PATH       = "final_model.pt"
+
 LOOP_PHASE      = 1      # 0 = no looping (fastest), 1 = one repeat, 2 = full (slowest).
-                         # On Pi 3, phase 0 is the right default. Try 1 if quality
-                         # feels off; phase 2 will roughly double per-token time.
-GREEDY          = False  # True = argmax, skips topk + multinomial overhead.
+GREEDY          = False  
 DEFAULT_MAX_NEW = 60
 DEFAULT_TEMP    = 0.8
 DEFAULT_TOP_K   = 40
-# Cap context to control attention cost. Trained at 2048; on a Pi don't go there.
+# Context trained at 2048 but capped at 512 for pi
 MAX_CONTEXT     = 512
-
-# Pre-warming the rotary cache makes the first generated token faster but
-# briefly spikes RAM at startup. If load OOMs, set this to False.
 PREWARM_ROTARY  = True
 
 device = torch.device("cpu")
 print(f"using device: {device} | threads={torch.get_num_threads()}")
 
 # ---------------------------------------------------------------------------
-# Build & load model
+# Build & load model — prefer quantized, fall back to fp32
 # ---------------------------------------------------------------------------
 h = Hyperparameters()
-
 t0 = time.time()
 model = GPT(h).float()
 restore_fp32_params(model)
 
-# Load weights, then immediately drop the state dict reference so we don't keep
-# a duplicate copy of the weights in memory during the GC cycle.
-sd = torch.load("final_model.pt", map_location="cpu")
-model.load_state_dict(sd, strict=True)
-del sd
+if os.path.exists(QUANT_PATH):
+    file_kb = os.path.getsize(QUANT_PATH) / 1024
+    print(f"loading quantized model: {QUANT_PATH} ({file_kb:.0f} KB)")
+    sd_cpu = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    with open(QUANT_PATH, "rb") as f:
+        quant_blob = f.read()
+    quant_state = torch.load(
+        io.BytesIO(_decompress(quant_blob, h.compressor)),
+        map_location="cpu",
+    )
+    deq_state = dequantize_mixed(quant_state["w"], quant_state["m"], sd_cpu)
+    model.load_state_dict(deq_state, strict=True)
+    del sd_cpu, quant_blob, quant_state, deq_state
+elif os.path.exists(FP32_PATH):
+    file_mb = os.path.getsize(FP32_PATH) / (1024 * 1024)
+    print(f"loading fp32 model: {FP32_PATH} ({file_mb:.0f} MB)")
+    sd = torch.load(FP32_PATH, map_location="cpu")
+    model.load_state_dict(sd, strict=True)
+    del sd
+else:
+    raise FileNotFoundError(
+        f"neither {QUANT_PATH} nor {FP32_PATH} found in current directory"
+    )
+
 gc.collect()
-print(f"loaded final_model.pt in {time.time() - t0:.1f}s")
+print(f"weights loaded in {time.time() - t0:.1f}s")
 
 if h.num_loops > 0:
     model.activate_looping(LOOP_PHASE)
     print(f"looping phase: {LOOP_PHASE}")
-
 model.eval()
 
 if PREWARM_ROTARY:
     # Prime each block's rotary cos/sin cache once so the first generation step
-    # doesn't pay for it. Uses a throwaway forward at MAX_CONTEXT.
+    # doesn't pay for it
     with torch.inference_mode():
         dummy = torch.zeros((1, MAX_CONTEXT), dtype=torch.long, device=device)
         _ = model.forward_logits(dummy)
@@ -116,9 +128,7 @@ print(f"model ready in {time.time() - t0:.1f}s")
 
 sp = spm.SentencePieceProcessor(model_file="fineweb_8192_bpe.model")
 
-# ---------------------------------------------------------------------------
-# Generation
-# ---------------------------------------------------------------------------
+# Streamed generation
 @torch.inference_mode()
 def generate(prompt: str,
              max_new_tokens: int = DEFAULT_MAX_NEW,
@@ -133,7 +143,6 @@ def generate(prompt: str,
         ids = ids[-budget:]
     prefix_len = len(ids)
     total_len  = prefix_len + max_new_tokens
-
     tokens = torch.zeros((1, total_len), dtype=torch.long, device=device)
     tokens[0, :prefix_len] = torch.tensor(ids, dtype=torch.long)
 
@@ -147,7 +156,6 @@ def generate(prompt: str,
 
     for step in range(max_new_tokens):
         logits = model.forward_logits(tokens[:, :pos])[0, -1]
-
         if greedy:
             next_tok = int(torch.argmax(logits).item())
         else:
@@ -193,6 +201,7 @@ def generate(prompt: str,
         if pending:
             print(pending.decode("utf-8", errors="replace"), end="", flush=True)
         print()
+
     if verbose:
         tps = max_new_tokens / elapsed if elapsed > 0 else 0
         print(f"  [first token: {t_first:.2f}s | {max_new_tokens} tokens in {elapsed:.1f}s = {tps:.2f} tok/s]")

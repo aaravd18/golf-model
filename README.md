@@ -1,6 +1,6 @@
 # Parameter Golf — 16MB Model on Raspberry Pi
 
-This repo demonstrates that **compressed intelligence can run on low-power edge hardware** — specifically, a 16MB quantized language model running inference on a Raspberry Pi 3. The goal is to show that with aggressive model compression and efficient training techniques, capable models need not be confined to data centers or high-end GPUs.
+This repo demonstrates that **compressed intelligence can run on low-power edge hardware**. Specifically, a 16MB quantized language model running inference on a Raspberry Pi 3. The goal is to show that with aggressive model compression and efficient training techniques, capable models need not be confined to data centers or high-end GPUs.
 
 The training script and inference code here are built around the constraints of the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition, which serves as a forcing function for maximizing model quality within tight size and compute budgets.
 

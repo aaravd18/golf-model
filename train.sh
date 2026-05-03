@@ -3,7 +3,6 @@ set -euo pipefail
 
 pip install -r requirements.txt
 pip install brotli
-# pip install runpod
 
 rm -f data/manifest.json
 MATCHED_FINEWEB_REPO_ID=kevclark/parameter-golf \
@@ -16,11 +15,3 @@ PARALLEL_RESIDUAL_START=7 \
 SEED=1337 \
 MAX_WALLCLOCK_SECONDS=1200 \
 torchrun --standalone --nproc_per_node=4 train_gpt.py 
-
-# sleep 300
-
-# python3 -c "
-# import os, runpod
-# runpod.api_key = os.environ['RUNPOD_API_KEY']
-# runpod.stop_pod(os.environ['RUNPOD_POD_ID'])
-# "

@@ -10,7 +10,7 @@ This work is based on the entry [`2026-04-06_SP8192_HessianSDClip_ProgressiveRec
 
 ## What This Repo Is
 
-- **Training**: A script to train a 16MB model using the techniques from the entry above (BPE tokenization w/ 8192 vocab size, Hessian-scaled gradient clipping, and progressive recurrence).
+- **Training**: A script to train a 16MB model using the techniques from the entry above (incorporates parallel residuals, depth recurrence, hessian-aware quantization).
 - **Inference**: [`inference_pi.py`](./inference_pi.py) contains code to run the 16MB quantized model on a **Raspberry Pi 3**, demonstrating that a competitively trained small model can perform inference on low-power edge hardware.
 
 ## Training
